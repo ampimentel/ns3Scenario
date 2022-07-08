@@ -1,0 +1,9 @@
+version: '3'
+
+services:
+  ns3:
+    build: .
+    image: ns3image:latest
+    volumes:
+      - ./measures:/usr/simNs3/ns-allinone-3.34/ns-3.34/measuresTest
+    
