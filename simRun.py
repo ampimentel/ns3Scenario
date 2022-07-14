@@ -1,11 +1,9 @@
 import csv
-from curses import nl
 import subprocess, shlex
 from math import ceil
-from os import path, remove
-
-from matplotlib.pyplot import table
-
+from os import path
+from functools import partial
+import concurrent.futures
 
 class SEScheme:
     
@@ -22,8 +20,9 @@ class SEScheme:
         return pars
         
     #initialize an algorithm with attributes 
-    def __init__(self, equations):
-        attr = self.parseEq(equations)
+    def __init__(self, equations, ident):
+        self.attr = self.parseEq(equations)
+        self.id = ident
 
     def getAttrs(self, algName, values):
         inf = algName + "_" 
@@ -63,7 +62,6 @@ def getSimValues(pattern, simEntry, portsApp):
     return {**lostPackets, **rcvPackets, **avgDelay}
 
 def cmdFunc(cmd):
-    print(cmd)
     process = subprocess.Popen(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, _ = process.communicate()
     print(out.decode('utf-8'))
@@ -86,9 +84,9 @@ def writeMeasure(measure, folder, filename):
         writer = csv.DictWriter(file, fieldnames = measure.keys())
         writer.writerow(measure)
 
-def measureAndWrite(input, portsApp, folder, filename):
-    measure = doOneMeasure(input, portsApp)
-    writeMeasure(measure, folder, filename)
+def measureAndWrite(portsApp, folder, filename, measure):
+    val = doOneMeasure(measure, portsApp)
+    writeMeasure(val, folder, filename)
 
 def readMeasures(folder, filename):
     if path.exists(folder + "/" + filename + ".csv"):
@@ -104,9 +102,6 @@ def alreadyMeasure(doneMeasures, inputs):
             if inp.items() <= g.items():
                 inputs.remove(inp)
                 break
-    #for g in doneMeasures:
-    #    if g in inputs:
-    #        inputs.remove(g)
 
 def getPacktesAndTime(scheme, nK):
     if scheme == 0:
@@ -120,43 +115,54 @@ def getPacktesAndTime(scheme, nK):
         processingTime = 57 * nK + 14
     return nPackets, processingTime, nPackets, processingTime
     
+def getInputsScenario1(scheme, numKeywords):
+    pT, nP = scheme.getAlgMeasures("enc", numKeywords, nbrLin=50)
+    return pT * 1000, ceil(nP / 65)
 
-def getInputsScenario 1(scheme, numKeywords, numDisj, )
+
+def getInputsScenario2(scheme, numKeywords, numDisj, nLin):
+    #getAlgMeasures(self, algName, nbrKey, nbrDisj=0, nbrLin=1)
+    pT1, nP1 = scheme.getAlgMeasures("gT", numKeywords, numDisj)
+    pT2, _ = scheme.getAlgMeasures("tst", numKeywords, numDisj, nLin)
+    _, sizeEnc = scheme.getAlgMeasures("enc", numKeywords, nbrLin=nLin)
+    nP2 = ceil(sizeEnc / 650)
+    nP1 = ceil(nP1 / 65)
+    return {"nPackets1":str(nP1), "procTime1":str(pT1*1000),  "nPackets2":str(nP2), "procTime2":str(pT2*1000)}
+
+
 
 def main():
     
     portsApp = {48: "1", 15: "2"}
-    numNodes = [10]#, 60, 100]#, 5, 10, 100, 1000, 100000]#, 10, 50, 100, 1000, 10000]
-    numKeywords = [1, 2]#, 10, 50]#, 5, 10, 100]
-    scheme = [0]
-    seed = [1]
+    schemePlain = {"gT_T": "0.001", "enc_T" : "0.001", "tst_T" : "0.000001", "gT_S" : "1", "enc_S": "0.008*x"}
+    scheme1 = {"gT_T": "0.01*x2 + 0.003*x", "enc_T" : "0.003*x+0.027", "tst_T" : "0.105*y+0.113", "gT_S" : "0.337*y+0.533", "enc_S": "0.074*x + 2.078"}
+    scheme2 = {"gT_T": "0.004*x", "enc_T" : "0.057*x+0.014", "tst_T" : "0.054*y+0.057", "gT_S" : "0.179*y+0.447", "enc_S": "0.781*x + 0.307"}
+    sePlain = SEScheme(schemePlain, 0)
+    seScheme1 = SEScheme(scheme1, 1)
+    seScheme2 = SEScheme(scheme2, 2)
+    scheme = [sePlain, seScheme1, seScheme2]
+    numNodes = [10]
+    numDisjunctions = [1]#,1]
+    numKeywords = [10]#,50]
+    numLines = [50]#,1000]
+    seed = [1]#,2,3]
     inputs = []
-    scheme1 = {"gT_T": "0.01x2 + 0.003x", "enc_T" : "0.003x+0.027", "tst_T" : "0.105y+0.113", "gT_S" : "0.337y+0.533", "enc_S": "0.074x + 2.078"}
-    scheme2 = {"gT_T": "0.004x", "enc_T" : "0.057x+0.014", "tst_T" : "0.054y+0.057", "gT_S" : "0.179+0.447", "enc_S": "0.781x + 0.307"}
-    seScheme1 = SEScheme(scheme1)
-    seScheme2 = SEScheme(scheme2)
+
     for sc in scheme:
         for nN in numNodes:
-            for nK in numKeywords:
-                for s in seed:
-                    nP1, pT1, nP2, pT2 = getPacktesAndTime(sc, nK)
-                    inputs.append({"scheme" : str(sc), "numNodes" : str(nN), "numKeywords" : str(nK), "nPackets1":str(nP1), "procTime1":str(pT1),  "nPackets2":str(nP2), "procTime2":str(pT2), "seed": str(s), "scenario" : str(2)})
+            for nL in numLines:
+                for nK in numKeywords:
+                    for nD in numDisjunctions:
+                        for s in seed:
+                            parm = getInputsScenario2(sc, nK, nD, nL)
+                            inp = {"scheme" : str(sc.id), "numNodes" : str(nN), "numKeywords" : str(nK), "seed": str(s), "scenario" : str(2)}
+                            inputs.append({**inp, **parm})
     
     doneMeasures = readMeasures("measuresTest","test1")
-    print(doneMeasures)
     alreadyMeasure(doneMeasures, inputs)
     print(inputs)
-    for measure in inputs:
-        measureAndWrite(measure, portsApp, "measuresTest","test1")
+    funcThread = partial(measureAndWrite, portsApp, "measuresTest","test1")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        executor.map(funcThread, inputs)
+        
 main()
-
-
-
-
-
-
-#considerações:
-#não permite aind recuperar os elementos desencriptados
-#o servidor sabe parte da query: "ID and Info"
-#podem ser usados mecanismos de caching para acelerar as querys: associar trapdoors a entradas da dB
-#podemos ainda usar estratégias mistas: guardar apenas alguns valores críticos (timestamp, velocidade, Enc(ID))

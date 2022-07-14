@@ -520,7 +520,7 @@ int main (int argc, char *argv[])
   std::cout << std::endl << "===BEGIN SIMULATION===" << std::endl;
 
   std::string phyMode ("OfdmRate6MbpsBW10MHz");
-  float start = 1.0, end = 66;
+  float start = 1.0, end = 15;
   int dataRate = 3e3;
   int num_nodes = 50;
   int num_baseStations = 1;
@@ -573,7 +573,7 @@ int main (int argc, char *argv[])
   NetDeviceContainer baseStationDevice =  waveHelper.Install (wavePhy, waveMac, baseStation);
     
 
-  setupMobility(mobTrace, "examples/labs/mobility", nodes, baseStation);
+  setupMobility(mobTrace, "examples/NS3Scenario/mobility", nodes, baseStation);
   
   //Network Layer
   InternetStackHelper internet;
