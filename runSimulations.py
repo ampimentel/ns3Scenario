@@ -1,114 +1,170 @@
-
 import csv
 import subprocess, shlex
-from functools import partial
-import json
-import argparse
-import random
 from math import ceil
 from os import path
+from functools import partial
+import concurrent.futures
+import multiprocessing
+
+class SEScheme:
+    
+    def parseEq(self, dictEquation):
+        pars = dict()
+        for name in dictEquation:
+            eqs = dictEquation[name].replace(" ", "").split("+")
+            for eq in eqs:
+                if "*" in eq:
+                    nbr, par = eq.split("*", 1)
+                else:
+                    nbr, par = eq, "c"
+                pars[name + "_" + par] = float(nbr)
+        return pars
+        
+    #initialize an algorithm with attributes 
+    def __init__(self, equations, ident):
+        self.attr = self.parseEq(equations)
+        self.id = ident
+
+    def getAttrs(self, algName, values):
+        inf = algName + "_" 
+        return [self.attr[inf + val] if inf + val in self.attr else 0 for val in values] 
+
+    def dotProd(self, lst1, lst2):
+        return sum(a*b for a, b in zip(lst1, lst2))
+    
+    #computes time and space that a given algorithm will take
+    def getAlgMeasures(self, algName, nbrKey, nbrDisj=0, nbrLin=1):
+        inputs = [nbrKey**2, nbrKey, nbrDisj**2, nbrDisj, 1]
+        tAttr = self.getAttrs(algName + "_T", ["x2", "x", "y2", "y", "c"])
+        sAttr = self.getAttrs(algName + "_S", ["x2", "x", "y2", "y", "c"])
+        time = self.dotProd(tAttr, inputs)
+        space = self.dotProd(sAttr, inputs)
+        if algName == "enc" or algName == "tst":
+            time *= nbrLin
+            space *= nbrLin
+        return time, space
 
 pattern = "\n===BEGIN SIMULATION===\n"
 
-def simGetInt(valId, simOutput):
+def simGetInt(valId, simOutput, extra = ""):
     rightPartition = simOutput.split(valId)[1]
-    return {valId: int(rightPartition.split("\n")[0])}
+    return {valId[:-2] + extra: int(rightPartition.split("\n")[0])}
 
-def getSimValues(pattern, simEntry):
-    simCleanEntry = simEntry.split(pattern)[1]
-    lostPackets = simGetInt("Total Lost Packets:", simCleanEntry)
-    rcvPackets = simGetInt("Total Received Packets:", simCleanEntry)
-    avgDelay = simGetInt("Average Delay (ms):", simCleanEntry)
+
+def getSimValues(pattern, simEntry, portsApp):
+    #print(simEntry)
+    simResults = simEntry.split(pattern)[1]
+    simCleanEntry=  simResults.split("Info on App with destination port:")[1:]
+    lostPackets, rcvPackets, avgDelay = {}, {}, {}
+    for sim in simCleanEntry:
+        port = int(sim.split("\n")[0])
+        lostPackets.update(simGetInt("Total Lost Packets: ", sim, portsApp[port]))
+        rcvPackets.update(simGetInt("Total Received Packets: ", sim, portsApp[port]))
+        avgDelay.update(simGetInt("Average Delay (ms): ", sim, portsApp[port]))
     return {**lostPackets, **rcvPackets, **avgDelay}
 
 def cmdFunc(cmd):
+    print(cmd)
     process = subprocess.Popen(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, _ = process.communicate()
     return out.decode('utf-8')
 
 #receive inputs that need to be computed
-def doOneMeasure(input):
-    cmd = lambda x : f"./waf --run \"scratch/vanet-test --numNodes=" + x["numNodes"] + " --procTime=" + x["procTime"] + " --nPackets=" + x["nPackets"] +" --mobTrace=" + x["seed"] + "\""
+def doOneMeasure(portApp, input):
+    cmd = lambda x : f"./waf --run-no-build \"examples/NS3Scenario/vanet-test --numNodes=" + x["numNodes"] + " --procTime1=" + x["procTime1"] + " --nPackets1=" + x["nPackets1"] + " --procTime2=" + x["procTime2"] + " --nPackets2=" + x["nPackets2"] +" --mobTrace=" + x["seed"] + " --scenario=" + x["scenario"]+ "\""
     simResutlt = cmdFunc(cmd(input))
-    output = getSimValues(pattern, simResutlt)    
+    output = getSimValues(pattern, simResutlt, portApp)
     return {**input, **output}
 
 
-def writeMeasure(measure, folder, filename):
-    if not path.exists(folder + "/" + filename + ".csv"):
-        with open(folder + "/" +filename + ".csv", mode="w") as file:
-            writer = csv.DictWriter(file, fieldnames = measure.keys())
-            writer.writeheader()
-    with open(folder + "/" + filename + ".csv", mode="a") as file:
-        writer = csv.DictWriter(file, fieldnames = measure.keys())
-        writer.writerow(measure)
 
-def measureAndWrite(input, folder, filename):
-    measure = doOneMeasure(input)
-    writeMeasure(measure, folder, filename)
+def measureAndWrite(portsApp, folder, filename, measure):
+    val = doOneMeasure(portsApp, measure)
+    writeMeasure(val, folder, filename)
 
-def readMeasures(folder, filename, dictEntries):
+def readMeasures(folder, filename):
     if path.exists(folder + "/" + filename + ".csv"):
         with open(folder + "/" + filename + ".csv", mode="r") as file:
             writer = csv.DictReader(file)
-            return [{en:line[en] for en in dictEntries} for line in writer]
+            return list(writer)
     return []
 
-def alreadyMeasure(doneMeasures, inputs): 
+#removes measures already done from inputs
+def alreadyMeasure(doneMeasures, inputs):     
     for g in doneMeasures:
-        if g in inputs:
-            inputs.remove(g)
+        for inp in inputs:
+            if inp.items() <= g.items():
+                inputs.remove(inp)
+                break
 
-def getPacktesAndTime(scheme, nK):
-    if scheme == 0:
-        nPackets =  1
-        processingTime = 10
-    elif scheme == 1:
-        nPackets =  ceil(50*(0.074*nK + 2.078) / 65.0)
-        processingTime = 3 * nK + 27
-    else: 
-        nPackets =  ceil(50*(0.781*nK + 0.307) / 65.0)
-        processingTime = 57 * nK + 14
-    return nPackets, processingTime
-    
+def getInputsScenario1(scheme, numKeywords):
+    pT, nP = scheme.getAlgMeasures("enc", numKeywords, nbrLin=50)
+    return pT * 1000, ceil(nP / 65)
+
+
+def getInputsScenario2(scheme, numKeywords, numDisj, nLin):
+    #getAlgMeasures(self, algName, nbrKey, nbrDisj=0, nbrLin=1)
+    pT1, nP1 = scheme.getAlgMeasures("gT", numKeywords, numDisj)
+    pT2, _ = scheme.getAlgMeasures("tst", numKeywords, numDisj, nLin)
+    _, sizeEnc = scheme.getAlgMeasures("enc", numKeywords, nbrLin=nLin)
+    nP2 = ceil(sizeEnc / 650)
+    nP1 = ceil(nP1 / 65)
+    return {"nPackets1":str(nP1), "procTime1":str(pT1*1000),  "nPackets2":str(nP2), "procTime2":str(pT2*1000)}
+
+
+def writeMeasures(measures, folder, filename):
+    keys = measures[0].keys()
+    print("MEASURES")
+    print(keys)
+    if not path.exists(folder + "/" + filename + ".csv"):
+        with open(folder + "/" +filename + ".csv", mode="w") as file:
+            dict_writer = csv.DictWriter(file, keys)
+            dict_writer.writeheader()
+            dict_writer.writerows(measures)
+    else:
+        with open(folder + "/" + filename + ".csv", mode="a") as file:
+            dict_writer = csv.DictWriter(file, keys)
+            dict_writer.writerows(measures)
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', required = True, type = int, help='Seed to random generate data')
-    parser.add_argument('--pathMeasures', default = "measures", help='Path to Measures Folder')
-
-    args = parser.parse_args()
-
-    numNodes = [10]#, 60, 100]#, 5, 10, 100, 1000, 100000]#, 10, 50, 100, 1000, 10000]
-    numKeywords = [1]#, 10, 50]#, 5, 10, 100]
-    scheme = [0, 1]
-    seed = [1]
+    
+    portsApp = {48: "1", 15: "2"}
+    schemePlain = {"gT_T": "0.001", "enc_T" : "0.001", "tst_T" : "0.000001", "gT_S" : "1", "enc_S": "0.008*x"}
+    scheme1 = {"gT_T": "0.01*x2 + 0.003*x", "enc_T" : "0.003*x+0.027", "tst_T" : "0.105*y+0.113", "gT_S" : "0.337*y+0.533", "enc_S": "0.074*x + 2.078"}
+    scheme2 = {"gT_T": "0.004*x", "enc_T" : "0.057*x+0.014", "tst_T" : "0.054*y+0.057", "gT_S" : "0.179*y+0.447", "enc_S": "0.781*x + 0.307"}
+    sePlain = SEScheme(schemePlain, 0)
+    seScheme1 = SEScheme(scheme1, 1)
+    seScheme2 = SEScheme(scheme2, 2)
+    scheme = [sePlain, seScheme1, seScheme2]
+    numNodes = [100]
+    numDisjunctions = [1, 2]
+    numKeywords = [20, 100]
+    numLines = [50,1000]
+    seed = [1 ,2, 3]
     inputs = []
+
     for sc in scheme:
         for nN in numNodes:
-            for nK in numKeywords:
-                for s in seed:
-                    nP, pT = getPacktesAndTime(sc, nK)
-                    inputs.append({"scheme" : str(sc), "numNodes" : str(nN), "numKeywords" : str(nK), "nPackets":str(nP), "procTime":str(pT), "seed": str(s)})
+            for nL in numLines:
+                for nK in numKeywords:
+                    for nD in numDisjunctions:
+                        for s in seed:
+                            parm = getInputsScenario2(sc, nK, nD, nL)
+                            inp = {"scheme" : str(sc.id), "numNodes" : str(nN), "numKeywords" : str(nK), "seed": str(s), "scenario" : str(2), "numLines" : nL, "numDisjunctions": nD}
+                            inputs.append({**inp, **parm})
     
-    doneMeasures = readMeasures("measuresTest","test1", ["scheme", "numNodes", "numKeywords", "nPackets", "procTime", "seed"])
+    doneMeasures = readMeasures("measuresTest","test5")
     alreadyMeasure(doneMeasures, inputs)
     print(inputs)
-    for measure in inputs:
-        measureAndWrite(measure, "measuresTest","test1")
+    funcThread2 = partial(doOneMeasure, portsApp)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        results = executor.map(funcThread2, inputs)
+    
+    print("Hello changes")
+    lstRes = list(results)
+    print(lstRes)
+
+    if len(lstRes) > 0:
+        print("HI")
+        writeMeasures(lstRes,"measuresTest","test5" )
 main()
-
-#o que falta: 
-#1. Mesmo mapa, carros em diferentes posições (x)
-#2. Tempo de simulação?
-#3. Paralelizar? 
-#4. DockerFile 
-#5. Upload no server e bombar!!!!!! 
-
-
-
-
-#considerações:
-#não permite aind recuperar os elementos desencriptados
-#o servidor sabe parte da query: "ID and Info"
-#podem ser usados mecanismos de caching para acelerar as querys: associar trapdoors a entradas da dB
-#podemos ainda usar estratégias mistas: guardar apenas alguns valores críticos (timestamp, velocidade, Enc(ID))
